@@ -7,6 +7,7 @@ import getopt  # for command-line options
 
 # Setup logging
 from logging.handlers import RotatingFileHandler
+import http.client, urllib #For pushover emergency messages
 
 # Application-specific inports
 from RPi import GPIO
@@ -17,12 +18,13 @@ import mainwindow_auto
 from pathlib import Path
 
 # Global variables to be assigned
-global conn  #MariaDB connection
-global cursor  #MariaDB update cursor
+global sqlConn  #MariaDB connection
+global sqlCursor  #MariaDB update cursor
 global curLog
-conn = None
+sqlCursor = None
 cursor = None
 curLog = None
+
 global sensorList = {
     airTemp = {
         lcdName = 'lcdAirTemp'
@@ -72,19 +74,26 @@ def setupLogging(inMode):
     curLog.addHandler(handler)
     curLog.info("Initialized log")
 
+def setPumpState(pin,flow):
+    if flow:
+        mode = GPIO.LOW
+    else:
+        mode = GPIO.HIGH
+    GPIO.output(relayGPIO, mode)
+
 def connectMariaDB():
     # Connect to MariaDB Platform
     try:
-        conn = mariadb.connect(
+        sqlConn = mariadb.connect(
             host="localhost",
             port=3306,
             database="hydroponics"
         )
-        conn.autocommit = True
+        sqlConn.autocommit = True
         # Get cursor
-        cursor = conn.cursor()
+        sqlCursor = sqlConn.cursor()
     except mariadb.Error as e:
-        print(f"Error connecting to MariaDB Platform: {e}")
+        print("Error connecting to MariaDB Platform: "+str(e))
         sys.exit(1)
 
 def insertRecord(sensor,data,comment):
@@ -93,8 +102,9 @@ def insertRecord(sensor,data,comment):
     # Set up insert
     sql = "INSERT INTO sensor_data VALUES ({},{},{},{});".format(datetime.now(),sensor,data,comment)
     # Execute
-    cursor.execute(sql)
+    sqlCursor.execute(sql)
 
+global pulse_start
 def getUltransonicDistance(trigPin,echoPin):
     GPIO.output(trigPin, False)
     # print("Waiting For Sensor To Settle")
@@ -117,6 +127,22 @@ def getUltransonicDistance(trigPin,echoPin):
     distance = pulse_duration * 17150
     distance = round(distance, 2)
 
+    return distance
+
+def sendEmergencyAlert(message):
+    log.info("Sending emergency message: '"+message+"'")
+    pushoverConn = httplib.HTTPSConnection("api.pushover.net:443")
+    pushoverConn.request("POST", "/1/messages.json",
+         urllib.urlencode({
+             "token": pushoverToken,
+             "user": pushoverUserKey,
+             "message": message,
+         }),
+        {"Content-type": "application/x-www-form-urlencoded"}
+    )
+    response = pushoverConn.getresponse()
+    log.debug("Pushover response: "+str(response))
+
 def main():
     curLog.info("Started main loop")
     # Initialize Sensors
@@ -124,54 +150,110 @@ def main():
     # DHT 11
 
     # Ultrasonic Distance/Reservoir WL
-    GPIO.setup(TRIG, GPIO.OUT)
-    GPIO.setup(ECHO, GPIO.IN)
+    GPIO.setup(trigPin, GPIO.OUT)
+    GPIO.setup(echoPin, GPIO.IN)
 
-    while True:
+    # Setup other variables
+    plantFlowDelayTimer = False #Controls whether we're waiting for plant for to kick back on
+    disablePlantFlow = False #Emergency override for plant flow
+    reservoirFlowDelayTimer = False #Controls whether we're waiting for reservoir flow to kick back on
+    disableReservoirFlow = False #Emergency override for reservoir flow
+    #nutrientFlowDelayTimer = False #Controls whether we're waiting for nutrient flow to kick back on
+    #disableNutrientFlow = False #Emergency ovewrride for nutrient flow
+
+    waterFlowingToPlants = False #Status variable for flow to plants
+    waterFlowingToReservoir = False #Status variable for flow to reservoir
+    #nutrientsFlowing = False #Status variable for nutrient flow
+    plantFlowTime = 0 #Time elapsed for flow to plants
+    reservoirFlowTime = 0 #Time elapsed for flow to reservoir
+    #nutrientFlowTime = 0 #Time elapsed for nutrient flow
+    plantFlowStartTime = 0
+    reservoirFlowStartTime = 0
+    #nutrientFlowStartTime = 0
+
+    log.debug("Main loop setup compelte, moving into repeat")
+    while True: #Loop until interrupted
         # DHT 11 Temp/Humudity
 
-        insertRecord("at1",curValue,"")
+        insertRecord("at1",curValue,"degC")
         log.info("Air Temp Reading: "+str(curValue))
 
 
-        insertRecord("wt1",curValue,"")
+        insertRecord("wt1",curValue,"%")
         log.info("Air Humidity Reading: "+str(curValue))
 
 
         # WL Float
         # Check value
         # if level has changed, flip operation
-        flowTime = datetime.now() - flowStartTime
-        currentState = GPIO.digitalRead(wlFloatPin)
-        if currentState == GPIO.HIGH and waterFlowing == True: #sensor is off, water is flowing
+        currentPlantFlowState = GPIO.input(wlFloatPin)
+        if waterFlowingToPlants:
+            plantFlowTime = datetime.now() - plantFlowStartTime
+        if currentPlantFlowState == GPIO.HIGH and waterFlowingToPlants == True: #sensor is off, water is flowing
             setPumpState(plantFlowPin,False) #turn water off
-            delayTimer = delayTime # Set a sanity check, only start flowing again after timer runs
-            delayStartTime = datetime.now()
-        elif currrentState == GPIO.Low and waterFlowing == False and delayTimer = 0: #sensor is on, water needs to flow
+            plantFlowDelayStartTime = datetime.now()
+            waterFlowingToPlants = False
+            log.info("Turning plant flow off")
+        elif currentPlantFlowState == GPIO.Low and waterFlowingToPlants == False and plantFlowDelayTimer == False and disablePlantFlow == False: #sensor is on, water needs to flow
             setPumpState(plantFlowPin,True) #turn water on
-            flowStartTime = datetime.now()
-        elif waterFlowing == True and flowTime > maxFlowSeconds: #emergency shutoff, we're running too long_options
+            plantFlowStartTime = datetime.now()
+            waterFlowingToPlants = True
+            log.info("Turning plant flow on,adding nutrients")
+            setPumpState(nutrientFlowPin,True) #turn nutrients on, hold here for 1 second just to make sure we don't overfeed
+            time.sleep(1) #1 second
+            setPumpState(nutrientFlowPin,False)
+            log.info("Nutrient addition finished")
+
+        elif waterFlowingToPlants  and plantFlowTime > maxFlowSeconds: #emergency shutoff, we're running too long_options
             setPumpState(plantFlowPin,False)
             disablePlantFlow = True
-            sendEmergencyAlert()
+            sendEmergencyAlert("Emergency! Water flow to plants disabled due to flow time exceedance")
+            log.error("Turning plant flow off, disabling, and sending alert")
 
         # O2
 
 
-        insertRecord("wt1",curValue,"")
+        insertRecord("wt1",curValue,"%")
         log.info("Air Oxygen Reading: "+str(curValue)+"%")
 
         # pH
+        # TBD if sensor is installed
 
+        #insertRecord("pH1",curValue,"")
+        #log.info("Air Humidity Reading: "+str(curValue))
 
-        insertRecord("wt1",curValue,"")
-        log.info("Air Humidity Reading: "+str(curValue))
+        # Reservoir level (ultrasonic distance)
+        curDistance = getUltransonicDistance(trigPin,echoPin)
+        if waterFlowingToReservoir:
+            reservoirFlowTime = datetime.now() - reservoirFlowStartTime
+        if curReservoirDistance > minReservoirDistance and waterFlowingToReservoir == True: #sensor < min distance, water is flowing
+            setPumpState(reservoirFlowPin,False) #turn water off
+            reservoirFlowDelayStartTime = datetime.now()
+            waterFlowingToReservoir = False
+        elif currentPlantFlowState == GPIO.Low and waterFlowingToReservoir == False and plantFlowDelayTimer == False and disableReservoirFlow == False: #sensor is on, water needs to flow
+            setPumpState(reservoirFlowPin,True) #turn water on
+            reservoirFlowStartTime = datetime.now()
+            waterFlowingToReservoir = True
+        elif waterFlowingToReservoir == True and reservoirFlowTime > maxFlowSeconds: #emergency shutoff, we're running too long_options
+            setPumpState(reservoirFlowPin,False)
+            disableReservoirFlow = True
+            sendEmergencyAlert("Emergency! Water flow to reservoir disabled due to flow time exceedance")
 
-        # loop management
-        if delayTimer = True:
-            delayTime = datetime.now() - delayStartTime
-            if delayTime > restartDelay:
-                delayTimer =
+        # Nutrient flow
+        # Theory: add 1 ml of nutrients whenever water is added to plants
+        # So this is handled in plant flow above
+
+        # loop management - check timers, resets, etc.
+        if plantFlowDelayTimer: #Reset flow to plants
+            plantFlowDelayTime = datetime.now() - plantFlowDelayStartTime
+            if plantFlowDelayTime > restartDelay:
+                plantFlowDelayTimer = False
+                log.info("Plant flow delay timer exceeded, resetting...")
+        if reservoirFlowDelayTimer: #Reset flow to reservoir
+            reservoirFlowDelayTime = datetime.now() - reservoirFlowDelayStartTime
+            if reservoirFlowDelayTime > restartDelay:
+                reservoitrFlowDelayTimer = False
+                log.info("Reservoir flow delay timer exceeded, resetting...")
 
 if __name__ == "__main__":
     # Process command-line args and handle appropriately
@@ -206,5 +288,6 @@ if __name__ == "__main__":
         curLog.critical("Generic Exception: "+str(e))
     finally:
         #close connect
-        conn.close()
+        sqlConn.close()
         curLog.debug("Connection Closed")
+        GPIO.cleanip
