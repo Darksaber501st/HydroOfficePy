@@ -1,0 +1,10 @@
+#!/bin/bash
+ 
+video="$(tvservice -s | sed "s/^.*\[\([^ ]*\) .*$/\1/" )"
+ 
+if [ "$video" != "HDMI" ];
+then
+  echo "headless"
+else
+  echo "HDMI"
+fi
