@@ -2,7 +2,7 @@
 # Generic imports
 import os, sys
 import mariadb
-import datetime import datetime
+from datetime import datetime, time
 import getopt  # for command-line options
 
 # Setup logging
@@ -17,25 +17,28 @@ from PyQT5.QtWidgets import *
 import mainwindow_auto
 from pathlib import Path
 
-# Global variables to be assigned
-global sqlConn  #MariaDB connection
-global sqlCursor  #MariaDB update cursor
-global curLog
+# Sensor-specific imports
+global pulse_start
+
+# Global variables to be assigned/called
+sqlConn = None
 sqlCursor = None
-cursor = None
 curLog = None
 
-global sensorList = {
-    airTemp = {
-        lcdName = 'lcdAirTemp'
-    }
-    'XXXSensorName':'lcdAirTemp'
-    'XXXSensorName':'lcdWaterTemp'
-    'XXXSensorName':'lcdWaterUse'
-    'XXXSensorName':'lcdAirHumidity'
+sensorList = {
+    'at1':'lcdAirTemp',
+    'ah1':'lcdAirHumidity',
+    'wu1':'lcdTodayPower',
+    'eu1':'lcdTodayWater',
+    'wu2':'lcdTotalWater',
+    'eu2':'lcdTotalPower',
+    'ao1':'lcdAirO2',
+    'rdw':'lcdRDW',
+    'rwl':'lcdRWL'
 }
 
 class HydroOffice(QMainWindow):
+    global sensorList
     def __init__(self):
         super(HydroOffice, self).__init__()
         self.load_ui()
@@ -59,6 +62,7 @@ class HydroOffice(QMainWindow):
         pass
 
 def setupLogging(inMode):
+    global curLog
     startTime = datetime.now()
     logFile = '/home/pi/hydrponics/logs/LOG_'+str(startTime.strftime("%Y%m%d_%H%M%S"))
     log_formatter = logging.Formatter('%(asctime)s %(levelname)s %(funcName)s(%(lineno)d) %(message)s')
@@ -82,6 +86,8 @@ def setPumpState(pin,flow):
     GPIO.output(relayGPIO, mode)
 
 def connectMariaDB():
+    global sqlConn
+    global sqlCursor
     # Connect to MariaDB Platform
     try:
         sqlConn = mariadb.connect(
@@ -97,25 +103,23 @@ def connectMariaDB():
         sys.exit(1)
 
 def insertRecord(sensor,data,comment):
+    global sqlConn
+    global sqlCursor
     # Get sensor DB name
-
+        # not done, we're going to feed it directly
     # Set up insert
     sql = "INSERT INTO sensor_data VALUES ({},{},{},{});".format(datetime.now(),sensor,data,comment)
     # Execute
     sqlCursor.execute(sql)
 
-global pulse_start
 def getUltransonicDistance(trigPin,echoPin):
     GPIO.output(trigPin, False)
-    # print("Waiting For Sensor To Settle")
-    time.sleep(2)
-
+    time.sleep(1) #Wait for sensor to settle
     GPIO.output(trigPin, True)
     time.sleep(0.00001)
     GPIO.output(trigPin, False)
 
     pulse_start = time.time()
-
     while GPIO.input(echoPin) == 0:
         pulse_start = time.time()
 
@@ -123,10 +127,8 @@ def getUltransonicDistance(trigPin,echoPin):
         pulse_end = time.time()
 
     pulse_duration = pulse_end - pulse_start
-
     distance = pulse_duration * 17150
     distance = round(distance, 2)
-
     return distance
 
 def sendEmergencyAlert(message):
@@ -173,15 +175,12 @@ def main():
 
     log.debug("Main loop setup compelte, moving into repeat")
     while True: #Loop until interrupted
-        # DHT 11 Temp/Humudity
-
-        insertRecord("at1",curValue,"degC")
-        log.info("Air Temp Reading: "+str(curValue))
-
-
-        insertRecord("wt1",curValue,"%")
-        log.info("Air Humidity Reading: "+str(curValue))
-
+        # AM2032 Temp/Humudity
+        humidity, temperature = Adafruit_DHT.read_retry(Adafruit_DHT.AM2302, dhtpin)
+        insertRecord("at1",temperature,"degC")
+        log.info("Air Temp Reading: "+str(temperature)+"deg C")
+        insertRecord("ah1",humidity,"%")
+        log.info("Air Humidity Reading: "+str(humidity)+"%")
 
         # WL Float
         # Check value
@@ -211,14 +210,12 @@ def main():
             log.error("Turning plant flow off, disabling, and sending alert")
 
         # O2
-
-
-        insertRecord("wt1",curValue,"%")
-        log.info("Air Oxygen Reading: "+str(curValue)+"%")
+        # TODO once we get this figured out
+        #insertRecord("ao1",curValue,"%")
+        #log.info("Air Oxygen Reading: "+str(curValue)+"%")
 
         # pH
         # TBD if sensor is installed
-
         #insertRecord("pH1",curValue,"")
         #log.info("Air Humidity Reading: "+str(curValue))
 

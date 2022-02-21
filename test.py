@@ -8,13 +8,16 @@ import getopt  # for command-line options
 # Setup logging
 from logging.handlers import RotatingFileHandler
 
-# Application-specific inports
+# Application inports
 from RPi import GPIO
 import PyQt5
 import QtCharts 2.15
 from PyQT5.QtWidgets import *
 import mainwindow_auto
 from pathlib import Path
+
+# Special sensor packages as needed
+import Adafruit_DHT
 
 # Global variables to be assigned
 global conn = None #MariaDB connection
