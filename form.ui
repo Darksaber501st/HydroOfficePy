@@ -47,6 +47,9 @@
       <height>101</height>
      </rect>
     </property>
+    <property name="value" stdset="0">
+     <double>0.000000000000000</double>
+    </property>
    </widget>
    <widget class="QLCDNumber" name="lcfAirRH">
     <property name="geometry">
